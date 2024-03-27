@@ -1,0 +1,607 @@
+#include<stdio.h>
+#include<mpi.h>
+#include<stdlib.h>
+#include<time.h>
+#include<math.h>
+#define leaf 9
+int rltc,rrtc,rprnt;
+int myrank,nprocsrow,column;
+int load;
+int cltc,crtc,cprnt;
+int *x,*f,*r;
+MPI_Status status;
+
+void MotLoadbalance();
+void RowEdgedimension(int* lec,int* rec,int* prnt,int p,int row,int column,MPI_Status* status);
+int RowWeightSum(int lec,int rec,int p,int count,int row,int column,MPI_Status* status);
+void RowTreeBroadcast(int p,int* T,int row,int column,MPI_Status* status);
+void RowDataExchange(int p,int lec,int rec,int parent,int* count,int* accquota,int row,int column,MPI_Status* status);
+void ColumnEdgedimension(int* lec,int* rec,int* prnt,int p,int row,int column,MPI_Status* status);
+int ColumnWeightSum(int lec,int rec,int p,int count,int row,int column,MPI_Status* status);
+void ColumnTreeBroadcast(int p,int* T,int row,int column,MPI_Status* status);
+void ColumnDataExchange(int p,int lec,int rec,int parent,int* count,int* accquota,int row,int column,MPI_Status* status);
+
+
+
+int main(int argc,char* argv[])
+{
+	int i;
+	MPI_Init(&argc,&argv);
+	MPI_Comm_size(MPI_COMM_WORLD,&nprocs);
+        	MPI_Comm_rank(MPI_COMM_WORLD,&myrank);
+	srand(time(0)+myrank);
+	x = (int*)malloc(100000*sizeof(int));
+	load = rand()%100;
+	for(i=0;i<load;i++)
+		x[i] = rand()%1000;
+	MotLoadbalance();
+	MPI_Finalize();
+		
+}
+
+void MotLoadbalance()
+{	
+	int p;
+	int Ravg,Rwtsum,Rpavg,Rquota,Raccquota,RT,Rr;
+	int Cavg,Cwtsum,Cpavg,Cquota,Caccquota,CT,Cr;
+	int temp;
+	//clock_t start0,end0,end1,start1;
+	double totime=0.00,start0=0.00,end0=0.00,start1=0.00,end1=0.00;
+	        	
+        	//p=nprocs;
+        	
+	temp = (int)sqrt(nprocs);
+	if(temp*temp!=nprocs)
+	{
+      		printf("Error!:# number of processors must be perfect square\n");
+              		printf("Programm aborting....\n");
+             		MPI_Abort(MPI_COMM_WORLD, 1);
+        	}
+        	else
+	{
+		row = (int)(myrank/temp);
+		column = myrank%temp;
+		RowEdgedimension(temp);
+		Rwtsum = RowWeightSum(rltc,rrtc,temp,count,row,column,&status);
+		if(column == 0)
+			RT = Rwtsum;
+		RowTreeBroadcast(temp,&RT,row,column,&status);
+		Ravg = (int)(RT/temp);
+		Rr = RT%temp;
+		if(column<Rr)
+			Rpavg = Ravg+1;
+		else
+			Rpavg = Ravg;
+		Rquota = RowWeightSum(rltc,rrtc,temp,Rpavg,row,column,&status);
+		Raccquota = Rwtsum - Rquota;
+		MPI_Barrier(MPI_COMM_WORLD);
+                		if(myrank == 0)
+		{
+                        		//start0 = clock();
+			start0 = MPI_Wtime();
+			//printf("Start0 : %lf\t",start0);
+		}
+                		RowDataExchange(temp,rltc,rrtc,rprnt,&count,&Raccquota,row,column,&status);
+		MPI_Barrier(MPI_COMM_WORLD);
+		if(myrank == 0)
+		{
+			//end0 = clock();
+			end0 = MPI_Wtime();
+			//printf("End0 : %lf\n",end0);
+		}
+		ColumnEdgedimension(&cltc,&crtc,&cprnt,temp,row,column,&status);
+		Cwtsum = ColumnWeightSum(cltc,crtc,temp,count,row,column,&status);
+		if(row == 0)
+        		CT = Cwtsum;
+		ColumnTreeBroadcast(temp,&CT,row,column,&status);
+		Cavg = (int)(CT/temp);
+		Cr = CT%temp;
+		if(row<Cr)
+        			Cpavg = Cavg+1;
+		else
+        			Cpavg = Cavg;
+		Cquota = ColumnWeightSum(cltc,crtc,temp,Cpavg,row,column,&status);
+		Caccquota = Cwtsum - Cquota;
+                
+		MPI_Barrier(MPI_COMM_WORLD);
+
+                		if(myrank == 0)
+		{
+                        		//start1 = clock();
+			start1 = MPI_Wtime();
+			//printf("\nStart1 : %lf\t",start1);
+		}	
+		  
+		ColumnDataExchange(temp,cltc,crtc,cprnt,&count,&Caccquota,row,column,&status);
+		//printf("Processor : %d %d\tLoad : %d\n",row,column,count);
+		MPI_Barrier(MPI_COMM_WORLD);
+		if(myrank==0)
+		{
+			//end1 = clock();
+			end1 = MPI_Wtime();
+			//printf("End1 : %lf\n",end1);
+			totime = (end0 - start0 + end1 - start1);
+			//printf("Total Time : %lf\n",totime);
+		}
+	}
+	
+}
+
+
+void RowEdgedimension(int p)
+{
+	int parenttag = 111;
+	if(column==0)
+        	{
+		rprnt = leaf;
+                		if(p==1)
+                		{
+                        		rltc=leaf;
+                        		rrtc=leaf;
+                		}
+                		if(p==2)
+                		{
+                        		rltc=0;
+                        		rrtc=leaf;            
+			MPI_Send(&rltc,1,MPI_INT,2*column+1+row*p,parenttag,MPI_COMM_WORLD);
+	                	}
+	                	if(p>=3)
+	                	{                  
+			rltc=0;
+                        		rrtc=1;                        						
+			MPI_Send(&rltc,1,MPI_INT,2*column+1+row*p,parenttag,MPI_COMM_WORLD);                        						MPI_Send(&rrtc,1,MPI_INT,2*column+2+row*p,parenttag,MPI_COMM_WORLD);
+	                	}
+        	}
+        	if(column!=0)
+        	{                		
+		MPI_Recv(prnt,1,MPI_INT,floor((column-1)/2)+row*p,parenttag,MPI_COMM_WORLD,&status);
+                		if((2*column+1)<p) 
+               		{
+                        		rltc = (rprnt+1)%3;                        										MPI_Send(&rltc,1,MPI_INT,2*column+1+row*p,parenttag,MPI_COMM_WORLD);
+	                	}
+	                	else
+                        		rltc = leaf;
+	                	if((2*column+2)<p)
+	                	{
+                        		rrtc = (rltc+1)%3;
+			MPI_Send(&rrtc,1,MPI_INT,2*column+2+row*p,parenttag,MPI_COMM_WORLD);
+	                	}
+	                	else
+                        		rrtc = leaf;
+        	}
+       }
+
+
+
+int RowWeightSum(int p)
+{
+	int sum=0,sumtag=222;
+	if(column!=0)
+	{
+        		if(rltc==leaf && rrtc==leaf)
+        		{
+                			sum = load;
+                			MPI_Send(&sum,1,MPI_INT,(int)floor((column-1)/2)+row*p,sumtag,MPI_COMM_WORLD);
+        		}
+		else if(rltc != leaf && rrtc == leaf)
+        		{
+                			MPI_Recv(&sum,1,MPI_INT,2*column+1+row*p,sumtag,MPI_COMM_WORLD,&status);
+                			sum = sum+load;
+                			MPI_Send(&sum,1,MPI_INT,(int)floor((column-1)/2)+row*p,sumtag,MPI_COMM_WORLD);
+        		}
+        		else
+        		{
+                			int load1,load2;
+                			MPI_Recv(&load1,1,MPI_INT,2*column+1+row*p,sumtag,MPI_COMM_WORLD,&status);
+                			MPI_Recv(&load2,1,MPI_INT,2*column+2+row*p,sumtag,MPI_COMM_WORLD,&status);
+                			sum = load1+load2+load;
+                			MPI_Send(&sum,1,MPI_INT,(int)floor((column-1)/2)+row*p,sumtag,MPI_COMM_WORLD);
+        		}
+	}
+	if(column==0)
+	{	
+		if(rltc==leaf && rrtc==leaf)
+        		{
+                			sum = load;
+                			//MPI_Recv(&sum,1,MPI_INT,2*(*myrank)+1,*myrank,MPI_COMM_WORLD,&status);
+        		}
+        		else if(rltc != leaf && rrtc == leaf)
+        		{
+                			MPI_Recv(&sum,1,MPI_INT,2*column+1+row*p,sumtag,MPI_COMM_WORLD,&status);
+                			sum = sum+load;
+        		}
+        		else
+        		{
+                			int load1,load2;
+                			MPI_Recv(&load1,1,MPI_INT,2*column+1+row*p,sumtag,MPI_COMM_WORLD,&status);
+                			MPI_Recv(&load2,1,MPI_INT,2*column+2+row*p,sumtag,MPI_COMM_WORLD,&status);
+                			sum = load1+load2+load;
+        		}
+	}
+	return sum;
+}
+
+
+
+void RowTreeBroadcast(int p,int* T)
+{
+	int broadtag=333;
+	if(column==0)
+	{
+		if(p>=2)
+        			MPI_Send(T,1,MPI_INT,2*column+1+row*p,broadtag,MPI_COMM_WORLD);
+        		if(p>=3)
+        			MPI_Send(T,1,MPI_INT,2*column+2+row*p,broadtag,MPI_COMM_WORLD);
+	}
+	if(column!=0)
+	{
+ 		MPI_Recv(T,1,MPI_INT,(int)floor((column-1)/2)+row*p,broadtag,MPI_COMM_WORLD,&status);
+		if((2*column+1)<p)
+ 			MPI_Send(T,1,MPI_INT,2*column+1+row*p,broadtag,MPI_COMM_WORLD);
+		if((2*column+2)<p)
+ 			MPI_Send(T,1,MPI_INT,2*column+2+row*p,broadtag,MPI_COMM_WORLD);
+	}
+	
+}
+
+
+
+
+void RowDataExchange(int p,int* accquota)
+{
+	int i,data,ack1=1,ack2=0,ack,acktag=444,datatag=441,recvAccl,recvAccr,acctag=442,Rcounter=0;
+	if(column!=0)
+		MPI_Send(accquota,1,MPI_INT,(int)floor((column-1)/2)+row*p,acctag,MPI_COMM_WORLD);
+	if(rltc!=leaf)
+		MPI_Recv(&recvAccl,1,MPI_INT,2*column+1+row*p,acctag,MPI_COMM_WORLD,&status);
+	else
+		recvAccl=0;
+	if(rrtc!=leaf)
+		MPI_Recv(&recvAccr,1,MPI_INT,2*column+2+row*p,acctag,MPI_COMM_WORLD,&status);
+	else
+		recvAccr=0;
+	while(*accquota!=0||recvAccl!=0||recvAccr!=0)
+	{
+		Rcounter++;
+		for(i=0;i<3;i++)
+		{
+			if(rprnt==i)
+			{
+				if((*accquota) > 0)
+	  			{
+					if(load>=(*accquota))
+					{
+						MPI_Send(&ack1,1,MPI_INT,(int)floor((column-1)/2)+row*p,acktag,MPI_COMM_WORLD);
+	    					(load)-=(*accquota);
+						MPI_Send(x,*accquota,MPI_INT,(int)floor((column-1)/2)+row*p,datatag,MPI_COMM_WORLD);
+						f = f + (*accquota);
+						*accquota =0;
+					}
+					else
+						MPI_Send(&ack2,1,MPI_INT,(int)floor((column-1)/2)+row*p,acktag,MPI_COMM_WORLD);
+				}
+	  			if((*accquota) < 0)
+				{
+	  				MPI_Recv(&ack,1,MPI_INT,(int)floor((column-1)/2)+row*p,acktag,MPI_COMM_WORLD,&status);
+					if(ack)
+					{
+						MPI_Recv(r,(-1)*(*accquota),MPI_INT,(int)floor((column-1)/2)+row*p,datatag,MPI_COMM_WORLD,&status);
+						r = r + (-1)*(*accquota);
+						load+= (-1)*(*accquota);
+						*accquota =0;
+					}
+				}
+			}
+			if(rltc==i)
+			{
+				if(recvAccl>0)
+				{
+					MPI_Recv(&ack,1,MPI_INT,2*column+1+row*p,acktag,MPI_COMM_WORLD,&status);
+					if(ack)
+					{
+						MPI_Recv(r,recvAccl,MPI_INT,2*column+1+row*p,datatag,MPI_COMM_WORLD,&status);				
+						r = r + recvAccl;
+						load+=recvAccl;
+						recvAccl=0;
+					}
+				}
+				if(recvAccl<0)
+				{
+					if((load)>=(-1)*recvAccl)
+					{
+						MPI_Send(&ack1,1,MPI_INT,2*column+1+row*p,acktag,MPI_COMM_WORLD);
+	    					(load)-=(-1)*recvAccl;
+						MPI_Send(f,(-1)*recvAccl,MPI_INT,2*column+1+row*p,datatag,MPI_COMM_WORLD);
+						f = f + (-1)*recvAccl;
+						recvAccl=0;
+					}
+					else
+						MPI_Send(&ack2,1,MPI_INT,2*column+1+row*p,acktag,MPI_COMM_WORLD);
+				}
+			}
+			if(rrtc==i)
+			{
+				if(recvAccr>0)
+				{
+					MPI_Recv(&ack,1,MPI_INT,2*column+2+row*p,acktag,MPI_COMM_WORLD,&status);
+					if(ack)
+					{
+						MPI_Recv(r,recvAccr,MPI_INT,2*column+2+row*p,datatag,MPI_COMM_WORLD,&status);				
+						r = r+recvAccr;
+						load+=recvAccr;
+						recvAccr=0;
+					}
+				}
+				if(recvAccr<0)
+				{
+					if((load)>=(-1)*recvAccr)
+					{
+						MPI_Send(&ack1,1,MPI_INT,2*column+2+row*p,acktag,MPI_COMM_WORLD);
+	    					(load)-=(-1)*recvAccr;
+						MPI_Send(f,(-1)*recvAccr,MPI_INT,2*column+2+row*p,datatag,MPI_COMM_WORLD);
+						f = f + (-1)*recvAccr;
+						recvAccr=0;
+					}
+					else
+						MPI_Send(&ack2,1,MPI_INT,2*column+2+row*p,acktag,MPI_COMM_WORLD);
+				}
+			}
+		}
+	}
+	x = f;
+	printf("Processor : %d %d\tRow Loop : %d\n",row,column,Rcounter);
+}
+
+
+
+
+
+
+
+
+void ColumnEdgedimension(int p)
+{
+	int parenttag = 112;
+	if(row==0)
+        	{
+			cprnt = leaf;
+                	if(p==1)
+                	{
+                        		cltc=leaf;
+                        		crtc=leaf;
+                	}
+                	if(p==2)
+                	{
+                        		cltc=0;
+                        		crtc=leaf;
+                        		MPI_Send(&cltc,1,MPI_INT,(2*row+1)*p+column,parenttag,MPI_COMM_WORLD);
+                	}
+                	if(p>=3)
+                	{
+                        		cltc=0;
+                        		crtc=1;
+                        		MPI_Send(&cltc,1,MPI_INT,(2*row+1)*p+column,parenttag,MPI_COMM_WORLD);
+                        		MPI_Send(&crtc,1,MPI_INT,(2*row+2)*p+column,parenttag,MPI_COMM_WORLD);
+                	}
+        	}
+        	if(row!=0)
+        	{
+                	MPI_Recv(&cprnt,1,MPI_INT,(floor((row-1)/2))*p+column,parenttag,MPI_COMM_WORLD,&status);
+                	if((2*row+1)<p)
+                	{
+                        		cltc = (cprnt+1)%3;
+                        		MPI_Send(&cltc,1,MPI_INT,(2*row+1)*p+column,parenttag,MPI_COMM_WORLD);
+                	}
+                	else
+                        		cltc = leaf;
+                	if((2*row+2)<p)
+                	{
+                        		crtc = (cltc+1)%3;
+                        		MPI_Send(&crtc,1,MPI_INT,(2*row+2)*p+column,parenttag,MPI_COMM_WORLD);
+                	}
+                	else
+                        		crtc = leaf;
+        	}
+        //printf("Processor : %d\tLeft Edge dimension : %d\tRight Edge dimension : %d\n",myrank,&cltc,&crtc);
+}
+
+
+
+
+
+int ColumnWeightSum(int lec,int rec,int p,int count,int row,int column,MPI_Status* status)
+{
+        int sum,sumtag=223;
+        if(row!=0)
+        {
+                        if(lec==leaf && rec==leaf)
+                        {
+                                sum = count;
+                                MPI_Send(&sum,1,MPI_INT,((int)floor((row-1)/2))*p+column,sumtag,MPI_COMM_WORLD);
+                        }
+                        else if(lec != leaf && rec == leaf)
+                        {
+                                MPI_Recv(&sum,1,MPI_INT,(2*row+1)*p+column,sumtag,MPI_COMM_WORLD,status);
+                                sum = sum+count;
+                                MPI_Send(&sum,1,MPI_INT,((int)floor((row-1)/2))*p+column,sumtag,MPI_COMM_WORLD);
+                        }
+                        else
+                        {
+                                int count1,count2;
+                                MPI_Recv(&count1,1,MPI_INT,(2*row+1)*p+column,sumtag,MPI_COMM_WORLD,status);
+                                MPI_Recv(&count2,1,MPI_INT,(2*row+2)*p+column,sumtag,MPI_COMM_WORLD,status);
+                                sum = count1+count2+count;
+                                MPI_Send(&sum,1,MPI_INT,((int)floor((row-1)/2))*p+column,sumtag,MPI_COMM_WORLD);
+                        }
+        }
+        if(row==0)
+        {
+                if(lec==leaf && rec==leaf)
+                {
+                        sum = count;
+                                //MPI_Recv(&sum,1,MPI_INT,2*(*myrank)+1,*myrank,MPI_COMM_WORLD,status);
+                }
+                else if(lec != leaf && rec == leaf)
+                {
+                        MPI_Recv(&sum,1,MPI_INT,(2*row+1)*p+column,sumtag,MPI_COMM_WORLD,status);
+                        sum = sum+count;
+                }
+                else
+                {
+                        int count1,count2;
+                        MPI_Recv(&count1,1,MPI_INT,(2*row+1)*p+column,sumtag,MPI_COMM_WORLD,status);
+                        MPI_Recv(&count2,1,MPI_INT,(2*row+2)*p+column,sumtag,MPI_COMM_WORLD,status);
+                        sum = count1+count2+count;
+                }
+        }
+        return sum;
+}
+
+
+
+
+
+
+
+
+
+
+
+void ColumnTreeBroadcast(int p,int* T,int row,int column,MPI_Status* status)
+{
+        int broadtag=334;
+        if(row==0)
+        {
+                if(p>=2)
+                        MPI_Send(T,1,MPI_INT,(2*row+1)*p+column,broadtag,MPI_COMM_WORLD);
+                if(p>=3)
+                        MPI_Send(T,1,MPI_INT,(2*row+2)*p+column,broadtag,MPI_COMM_WORLD);
+        }
+        if(row!=0)
+        {
+                MPI_Recv(T,1,MPI_INT,((int)floor((row-1)/2))*p+column,broadtag,MPI_COMM_WORLD,status);
+                if((2*row+1)<p)
+                        MPI_Send(T,1,MPI_INT,(2*row+1)*p+column,broadtag,MPI_COMM_WORLD);
+                if((2*row+2)<p)
+                        MPI_Send(T,1,MPI_INT,(2*row+2)*p+column,broadtag,MPI_COMM_WORLD);
+        }
+
+}
+
+
+
+
+
+void ColumnDataExchange(int p,int lec,int rec,int parent,int* count,int* accquota,int row,int column,MPI_Status* status)
+{
+        int i,cdata,cack1=1,cack2=0,cack,cacktag=445,cdatatag=446,crecvAccl,crecvAccr,cacctag=447,Ccounter=0,*counter;
+	counter = (int*)malloc((p*p)*sizeof(int));
+        if(row!=0)
+                MPI_Send(accquota,1,MPI_INT,((int)floor((row-1)/2))*p+column,cacctag,MPI_COMM_WORLD);
+        if(lec!=leaf)
+                MPI_Recv(&crecvAccl,1,MPI_INT,(2*row+1)*p+column,cacctag,MPI_COMM_WORLD,status);
+        else
+                crecvAccl=0;
+        if(rec!=leaf)
+                MPI_Recv(&crecvAccr,1,MPI_INT,(2*row+2)*p+column,cacctag,MPI_COMM_WORLD,status);
+        else
+                crecvAccr=0;
+	//printf("Row : %d\tColumn : %d\tLec : %d\tReceive Left : %d\tRecieve Right : %d\n",row,column,lec,crecvAccl,crecvAccr);
+	MPI_Barrier(MPI_COMM_WORLD);
+        while(*accquota!=0||crecvAccl!=0||crecvAccr!=0)
+        {
+		Ccounter++;
+                for(i=0;i<3;i++)
+                {
+                        if(parent==i)
+                        {
+                                if((*accquota) > 0)
+                                {
+                                        if((*count)>=(*accquota))
+                                        {
+                                                MPI_Send(&cack1,1,MPI_INT,p*((int)floor((row-1)/2))+column,cacktag,MPI_COMM_WORLD);
+                                                (*count)-=(*accquota);
+                                                MPI_Send(accquota,1,MPI_INT,p*((int)floor((row-1)/2))+column,cdatatag,MPI_COMM_WORLD);
+                                                *accquota =0;
+                                        }
+                                        else
+                                                MPI_Send(&cack2,1,MPI_INT,p*((int)floor((row-1)/2))+column,cacktag,MPI_COMM_WORLD);
+                                }
+                                if((*accquota) < 0)
+                                {
+                                        MPI_Recv(&cack,1,MPI_INT,p*((int)floor((row-1)/2))+column,cacktag,MPI_COMM_WORLD,status);
+                                        if(cack)
+                                        {
+                                                MPI_Recv(&cdata,1,MPI_INT,p*((int)floor((row-1)/2))+column,cdatatag,MPI_COMM_WORLD,status);
+                                                *accquota =0;
+                                                (*count)+=(-1)*cdata;
+                                        }
+                                }
+                        }
+                        if(lec==i)
+                        {
+                                if(crecvAccl>0)
+                                {
+                                        MPI_Recv(&cack,1,MPI_INT,(2*row+1)*p+column,cacktag,MPI_COMM_WORLD,status);
+                                        if(cack)
+                                        {
+                                                MPI_Recv(&cdata,1,MPI_INT,(2*row+1)*p+column,cdatatag,MPI_COMM_WORLD,status);
+                                                crecvAccl=0;
+                                                (*count)+=cdata;
+                                        }
+                                }
+                                if(crecvAccl<0)
+                                {
+                                        if((*count)>=(-1)*crecvAccl)
+                                        {
+                                                MPI_Send(&cack1,1,MPI_INT,(2*row+1)*p+column,cacktag,MPI_COMM_WORLD);
+                                                (*count)-=(-1)*crecvAccl;
+                                                MPI_Send(&crecvAccl,1,MPI_INT,(2*row+1)*p+column,cdatatag,MPI_COMM_WORLD);
+                                                crecvAccl=0;
+                                        }
+                                        else
+                                                MPI_Send(&cack2,1,MPI_INT,(2*row+1)*p+column,cacktag,MPI_COMM_WORLD);
+                                }
+                        }
+                        if(rec==i)
+                        {
+                                if(crecvAccr>0)
+                                {
+                                        MPI_Recv(&cack,1,MPI_INT,(2*row+2)*p+column,cacktag,MPI_COMM_WORLD,status);
+                                        if(cack)
+                                        {
+                                                MPI_Recv(&cdata,1,MPI_INT,(2*row+2)*p+column,cdatatag,MPI_COMM_WORLD,status);
+                                                crecvAccr=0;
+                                                (*count)+=cdata;
+                                        }
+                                }
+                                if(crecvAccr<0)
+                                {
+                                        if((*count)>=(-1)*crecvAccr)
+                                        {
+                                                MPI_Send(&cack1,1,MPI_INT,(2*row+2)*p+column,cacktag,MPI_COMM_WORLD);
+                                                (*count)-=(-1)*crecvAccr;
+                                                MPI_Send(&crecvAccr,1,MPI_INT,(2*row+2)*p+column,cdatatag,MPI_COMM_WORLD);
+                                                crecvAccr=0;
+                                        }
+                                        else
+                                                MPI_Send(&cack2,1,MPI_INT,(2*row+2)*p+column,cacktag,MPI_COMM_WORLD);
+                                }
+                        }
+                }
+        }
+	/*if(row==0 && column ==0)
+	{
+		counter[0] = Ccounter;
+		Ccountermax = counter[0];
+		for(i=1;i<p*p;i++)
+			MPI_Recv(&counter[i],1,MPI_INT,i,countertag,MPI_COMM_WORLD,status);
+		for(i=1;i<p*p;i++)
+			if(counter[i]>Ccountermax)
+				Ccountermax = counter[i];
+		printf("Maximum Loop by a processor : %d",Ccountermax);
+	}
+	else
+		MPI_Send(&Ccounter,1,MPI_INT,0,countertag,MPI_COMM_WORLD);*/
+	printf("Processor : %d %d\tColumn  Loop : %d\n",row,column,Ccounter);
+}
